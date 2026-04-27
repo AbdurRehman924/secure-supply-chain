@@ -1,0 +1,9 @@
+# .trivyignore — Accepted risk exceptions
+# Format: CVE-ID  # reason | expires: YYYY-MM-DD | owner: @handle
+#
+# Every entry MUST have a reason, expiry, and owner.
+# Expired entries will cause the pipeline to fail — this is intentional.
+# Review process: open a PR to renew or remove entries.
+
+# Example (remove before production use):
+# CVE-2023-XXXXX  # false positive in test dependency only, not in final image | expires: 2026-07-01 | owner: @your-handle
