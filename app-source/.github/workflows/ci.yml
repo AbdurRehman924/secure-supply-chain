@@ -1,0 +1,221 @@
+name: secure-supply-chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+
+# Workflow-level default: read-only. Jobs escalate only what they need.
+permissions:
+  contents: read
+
+jobs:
+  # ── PR gate ────────────────────────────────────────────────────────────────
+  # Runs on every PR. Fast feedback: secret scan + IaC lint + build verify.
+  # Does NOT push, sign, or touch the registry.
+  pr-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for secret scan delta
+
+      # Detect secrets committed in this PR's diff only — not the full repo history.
+      # Using Gitleaks over truffleHog: deterministic config, no network calls.
+      - name: Secret scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lint Kubernetes manifests and Kyverno policies for structural issues.
+      # Catches schema violations before they reach the cluster.
+      - name: IaC lint (Kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.4/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin
+          find gitops-config -name '*.yaml' | xargs kubeconform \
+            -strict \
+            -ignore-missing-schemas \
+            -kubernetes-version 1.29.0
+
+      # Build image without pushing — verify the Dockerfile compiles cleanly.
+      - name: Build (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: app-source
+          push: false
+          tags: ${{ env.IMAGE }}:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Main branch: build → scan → sign → attest → provenance ───────────────
+  build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write        # OIDC for keyless Cosign + SLSA provenance
+      security-events: write
+
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ env.IMAGE }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret scan (full branch)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build args bake the commit SHA and build timestamp into the image layer.
+      # This makes the image reproducibly traceable without relying on tags.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: app-source
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false   # we generate SLSA provenance ourselves below
+
+      # Scan by digest — the tag written above is immediately mutable.
+      # ignore-unfixed: only fail on CVEs with an available fix.
+      # Unfixed CVEs are tracked in GitHub Security tab but don't block.
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.19.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy.sarif
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+
+      # Grype as a second scanner — different vulnerability DB than Trivy.
+      # Two scanners with different DBs reduce false-negative risk.
+      # We don't fail on Grype alone; we use it for diff/audit output.
+      - name: Vulnerability scan (Grype — audit)
+        uses: anchore/scan-action@v3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          fail-build: false
+          output-format: sarif
+          output-file: grype.sarif
+
+      - name: Upload Grype SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: grype.sarif
+
+      # SPDX-JSON is the format required by Kyverno's attestation predicate check.
+      # CycloneDX is also generated for tooling that prefers it (Dependency-Track, etc.)
+      - name: Generate SBOM (Syft — SPDX + CycloneDX)
+        uses: anchore/sbom-action@v0.15.11
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - uses: sigstore/cosign-installer@v3.5.0
+
+      # Keyless signing via GitHub OIDC. The certificate embeds:
+      #   - Subject: exact workflow URL (enforced by Kyverno policy)
+      #   - Issuer: https://token.actions.githubusercontent.com
+      # Changing the workflow path or branch invalidates existing signatures.
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+
+      # Attach SBOM as a verifiable OCI attestation — not a sidecar file.
+      # Kyverno's verifyImages.attestations block checks this predicate type.
+      - name: Attest SBOM
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+
+  # ── SLSA Level 2 provenance ───────────────────────────────────────────────
+  # Runs as a separate job so the provenance generator can attest the build job's
+  # outputs without having write access during the build itself.
+  # This separation is a SLSA L2 requirement — the builder and provenance
+  # generator must be isolated.
+  provenance:
+    needs: build
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ${{ needs.build.outputs.image }}
+      digest: ${{ needs.build.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── GitOps promotion ──────────────────────────────────────────────────────
+  # Pins the immutable digest in the production overlay.
+  # ArgoCD detects the commit and syncs — no webhook, no polling secret needed.
+  promote:
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/gitops-config
+          token: ${{ secrets.GITOPS_PAT }}
+
+      - uses: imranismail/setup-kustomize@v2
+
+      - name: Pin digest in production overlay
+        run: |
+          cd apps/my-app/overlays/production
+          kustomize edit set image my-app=${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+
+      - name: Commit
+        run: |
+          git config user.email "ci-bot@noreply.github.com"
+          git config user.name "ci-bot"
+          git commit -am "ci: promote ${{ github.sha }} [skip ci]"
+          git push

@@ -1,0 +1,12 @@
+# Changes to CI pipeline require review from the security team.
+# This prevents a developer from weakening scan thresholds or removing
+# signing steps without an explicit security sign-off.
+.github/workflows/          @your-org/security-team
+
+# Policy changes require both security and platform review.
+# A policy that's too strict breaks deployments; too loose defeats the purpose.
+gitops-config/policies/     @your-org/security-team @your-org/platform-team
+gitops-config/argocd/       @your-org/platform-team
+
+# Dockerfile changes require security review — base image, user, capabilities.
+app-source/Dockerfile       @your-org/security-team
