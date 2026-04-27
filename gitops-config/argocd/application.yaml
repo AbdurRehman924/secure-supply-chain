@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # Reference the scoped AppProject — not default.
+  project: my-app
+  source:
+    repoURL: https://github.com/your-org/gitops-config
+    targetRevision: main
+    path: apps/my-app/overlays/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # avoids annotation size limits on large manifests
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,70 @@
+# Custom Falco rules for my-app workloads.
+# These supplement the default Falco ruleset — they do not replace it.
+# Deploy via Helm: falco --set-file falco.rules_file=falco-rules.yaml
+#
+# Design principle: alert on deviation from known-good behavior,
+# not on a list of known-bad behaviors. The latter is always incomplete.
+
+- rule: Unexpected outbound connection from my-app
+  desc: >
+    my-app has no legitimate reason to make outbound connections
+    (NetworkPolicy enforces this at the kernel network layer too,
+    but Falco catches it at the syscall layer before the packet is dropped).
+  condition: >
+    outbound and
+    container.label.app_kubernetes_io_name = "my-app" and
+    not fd.sport in (53)
+  output: >
+    Unexpected outbound connection from my-app
+    (pod=%container.name ip=%fd.rip port=%fd.rport
+     image=%container.image.repository:%container.image.tag)
+  priority: WARNING
+  tags: [network, my-app]
+
+- rule: Shell spawned in my-app container
+  desc: >
+    distroless images have no shell. Any shell execution indicates
+    either a container escape attempt or a compromised base image.
+    This should never fire in normal operation.
+  condition: >
+    spawned_process and
+    container.label.app_kubernetes_io_name = "my-app" and
+    proc.name in (shell_binaries)
+  output: >
+    Shell spawned in my-app (pod=%container.name
+     shell=%proc.name parent=%proc.pname
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [process, my-app]
+
+- rule: Unexpected file write in my-app
+  desc: >
+    readOnlyRootFilesystem is set in the pod spec, but Falco catches
+    writes at the syscall level — before the kernel rejects them.
+    Any write attempt indicates unexpected behavior worth investigating.
+  condition: >
+    open_write and
+    container.label.app_kubernetes_io_name = "my-app" and
+    not fd.name startswith /tmp and
+    not fd.name startswith /dev/null
+  output: >
+    Unexpected file write in my-app
+    (pod=%container.name file=%fd.name
+     image=%container.image.repository:%container.image.tag)
+  priority: WARNING
+  tags: [filesystem, my-app]
+
+- rule: Privilege escalation attempt in my-app
+  desc: >
+    Detects setuid/setgid execution — a common privilege escalation vector.
+    Should never occur in a distroless, non-root container.
+  condition: >
+    container.label.app_kubernetes_io_name = "my-app" and
+    evt.type in (setuid, setgid) and
+    evt.dir = <
+  output: >
+    Privilege escalation attempt in my-app
+    (pod=%container.name proc=%proc.name
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [privilege, my-app]

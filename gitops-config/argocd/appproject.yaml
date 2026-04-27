@@ -1,0 +1,59 @@
+# AppProject scopes what ArgoCD is allowed to deploy and where.
+# Using the default project is equivalent to no RBAC — any Application
+# in the cluster can deploy to any namespace from any source repo.
+# This AppProject enforces least-privilege at the GitOps layer.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: my-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "Production workloads for my-app"
+
+  # Only this repo is a valid source. A misconfigured Application pointing
+  # at a fork or attacker-controlled repo will be rejected by ArgoCD.
+  sourceRepos:
+    - https://github.com/your-org/gitops-config
+
+  # Only deploy to the production and staging namespaces in this cluster.
+  # Prevents an Application from deploying to kube-system or argocd itself.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: production
+    - server: https://kubernetes.default.svc
+      namespace: staging
+
+  # Allowlist of Kubernetes resource types this project may manage.
+  # ArgoCD will refuse to sync any resource type not listed here.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: "apps"
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: "networking.k8s.io"
+      kind: NetworkPolicy
+    - group: "policy"
+      kind: PodDisruptionBudget
+
+  # Deny deploying ClusterRoles, ClusterRoleBindings, or any cluster-scoped
+  # resource that could escalate privileges beyond this project's scope.
+  clusterResourceBlacklist:
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRole
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+
+  roles:
+    - name: ci-deployer
+      description: "Used by the CI promote job — read-only sync trigger only"
+      policies:
+        - p, proj:my-app:ci-deployer, applications, sync, my-app/*, allow
+        - p, proj:my-app:ci-deployer, applications, get, my-app/*, allow
+      groups:
+        - your-org:ci-bots
