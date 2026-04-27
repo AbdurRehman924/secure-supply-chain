@@ -1,0 +1,25 @@
+# Every Deployment must carry traceability labels so any running workload
+# can be traced back to a specific image version and git commit.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-traceability-labels
+  annotations:
+    policies.kyverno.io/title: Require Traceability Labels
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-deployment-labels
+      match:
+        any:
+          - resources:
+              kinds: [Deployment]
+              namespaces: [production, staging]
+      validate:
+        message: "Deployments must have 'app.kubernetes.io/version' and 'commit-sha' labels."
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/version: "?*"
+              commit-sha: "?*"

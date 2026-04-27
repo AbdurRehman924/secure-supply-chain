@@ -1,0 +1,86 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+  annotations:
+    policies.kyverno.io/title: Verify Image Signature, SBOM, and SLSA Provenance
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >
+      Rejects pods in production/staging unless the image has:
+      (1) a valid Cosign keyless signature from our CI workflow,
+      (2) an SPDX SBOM attestation,
+      (3) a SLSA provenance attestation at level >= 2.
+spec:
+  validationFailureAction: Enforce
+  # background: false — signature verification requires registry credentials
+  # that are not available in the background controller's context.
+  # Background scanning would silently skip verification and produce false-pass results.
+  background: false
+  rules:
+    - name: verify-signature-and-attestations
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [production, staging]
+      # Exclude system namespaces — Kyverno, ArgoCD, and CNI pods use images
+      # from upstream registries that are not signed by our workflow.
+      # Without this exclude, cluster bootstrap and upgrades break.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - argocd
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/your-org/*"
+          attestors:
+            - entries:
+                - keyless:
+                    # Subject is the exact workflow URL — not just the repo.
+                    # A compromised fork or a different workflow in the same repo
+                    # cannot produce a valid signature for this subject.
+                    subject: "https://github.com/your-org/app-source/.github/workflows/ci.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          # Require SBOM attestation (SPDX predicate type).
+          # An image built outside CI will not have this — it will be rejected.
+          attestations:
+            - predicateType: https://spdx.dev/Document
+
+    - name: verify-slsa-provenance
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [production, staging]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - argocd
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/your-org/*"
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v2.0.0"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          attestations:
+            - predicateType: https://slsa.dev/provenance/v0.2
