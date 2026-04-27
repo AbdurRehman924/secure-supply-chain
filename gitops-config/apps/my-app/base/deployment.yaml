@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "0.0.0"
+    commit-sha: "unknown"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  # Wait for new pods to be ready before terminating old ones.
+  # maxUnavailable: 0 ensures zero-downtime rollouts at the cost of
+  # briefly running replicas+1 pods. Acceptable for stateless workloads.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+        app.kubernetes.io/version: "0.0.0"
+        commit-sha: "unknown"
+    spec:
+      automountServiceAccountToken: false
+      # Pod-level seccomp: RuntimeDefault restricts syscalls to a safe allowlist.
+      # This is enforced at the kernel level — Kyverno policy is a second check.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Spread pods across zones AND nodes. Without this, the scheduler may
+      # place both replicas on the same node — a single node failure takes down
+      # the service despite having 2 replicas.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: my-app
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: my-app
+
+      containers:
+        - name: my-app
+          image: my-app:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          # Graceful shutdown: give in-flight requests time to complete.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sleep", "5"]
+          terminationMessagePolicy: FallbackToLogsOnError

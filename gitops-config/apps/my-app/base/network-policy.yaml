@@ -1,0 +1,57 @@
+# Default-deny all ingress and egress for the my-app pods.
+# Explicit allow rules below are the only permitted traffic paths.
+# This is a zero-trust network posture — pods cannot reach arbitrary
+# cluster services or the internet unless explicitly permitted here.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-app-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-app-allow-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow traffic from the ingress controller only.
+    # Pods are not directly reachable from other namespaces.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-app-allow-egress-dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution only — no other egress permitted.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
