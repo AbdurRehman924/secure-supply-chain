@@ -202,6 +202,4 @@ kubectl apply -f gitops-config/argocd/
 
 ---
 
-## What this is not
 
-This project does not include a service mesh (mTLS between pods), runtime image scanning (re-scanning running containers), or a SIEM integration. Those are the natural next layers and are documented as follow-on work in the issues.
