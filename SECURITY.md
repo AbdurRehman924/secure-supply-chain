@@ -1,20 +1,5 @@
 # Security Policy
 
-## Supported Versions
-
-Only the latest commit on `main` is supported. There are no versioned releases.
-
-## Reporting a Vulnerability
-
-Do not open a public GitHub issue for security vulnerabilities.
-
-Report via GitHub's private vulnerability reporting:
-**Security → Report a vulnerability** (in the repo sidebar)
-
-Or email: security@your-org.com (PGP key: https://your-org.com/pgp)
-
-Expected response time: 48 hours for acknowledgment, 14 days for triage.
-
 ## Supply Chain Integrity
 
 Every image built from this repository is:
